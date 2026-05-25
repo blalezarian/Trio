@@ -1,8 +1,10 @@
 import Charts
 import CoreData
+import Foundation
 import LoopKitUI
 import SwiftUI
 import Swinject
+import UIKit
 
 extension Treatments {
     struct RootView: BaseView {
@@ -204,6 +206,10 @@ extension Treatments {
 
         var body: some View {
             ZStack(alignment: .center) {
+                // Warm up the keyboard on appear so the first tap into the Note field doesn't pay
+                // the one-time keyboard initialization delay. Renders nothing.
+                KeyboardPrewarmer()
+                    .frame(width: 0, height: 0)
                 VStack {
                     List {
                         Section {
@@ -280,7 +286,12 @@ extension Treatments {
                                 TextFieldWithToolBarString(
                                     text: $state.note,
                                     placeholder: String(localized: "Note..."),
-                                    maxLength: 25
+                                    // Free text reads left-to-right; the default `.right` alignment
+                                    // anchors text to the right edge and collapses trailing spaces,
+                                    // which made the caret appear stuck when typing a space.
+                                    textAlignment: .natural,
+                                    maxLength: 25,
+                                    adjustsFontSizeToFitWidth: false
                                 )
                             }
                         }.listRowBackground(Color.chart)
@@ -420,6 +431,15 @@ extension Treatments {
                     }
                 }
             })
+            // While a field is being edited (keyboard up), pause background forecast-chart refreshes
+            // so the chart re-render doesn't make typing/keyboard feel laggy. The chart catches up
+            // the moment the keyboard is dismissed (before the user can reach the submit button).
+            .onReceive(Foundation.NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                state.beginEditing()
+            }
+            .onReceive(Foundation.NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                state.endEditing()
+            }
             .onAppear {
                 configureView {
                     state.isActive = true

@@ -20,6 +20,15 @@ extension Treatments {
         @ObservationIgnored @Injected() var determinationStorage: DeterminationStorage!
         @ObservationIgnored @Injected() var bolusCalculationManager: BolusCalculationManager!
 
+        // While the user is editing a field (keyboard up), background forecast refreshes are
+        // deferred so the Swift Charts re-render doesn't hitch text input. `hasDeferredForecastUpdate`
+        // remembers that an update arrived during editing so we can catch up the chart on dismiss.
+        @ObservationIgnored private var isEditing = false
+        @ObservationIgnored private var hasDeferredForecastUpdate = false
+        // Debounces the resume so a field-to-field switch (which can briefly fire keyboard
+        // hide→show) doesn't trigger a chart refresh right as the user starts typing the next field.
+        @ObservationIgnored private var resumeForecastsWorkItem: DispatchWorkItem?
+
         var lowGlucose: Decimal = 70
         var highGlucose: Decimal = 180
         var glucoseColorScheme: GlucoseColorScheme = .staticColor
@@ -866,9 +875,43 @@ extension Treatments.StateModel {
             let insulinCalculated = await self.calculateInsulin()
             guard !Task.isCancelled else { return }
             self.insulinCalculated = insulinCalculated
+
+            // While the user is editing a field (keyboard up), defer only the forecast half so the
+            // Swift Charts re-render doesn't contend with text input. The bolus recommendation above
+            // still updates. `endEditing()` catches the chart up on keyboard dismissal.
+            guard !self.isEditing else {
+                self.hasDeferredForecastUpdate = true
+                return
+            }
+
             let forecastData = self.mapForecastsFromController()
             await self.updateForecasts(with: forecastData)
         }
+    }
+
+    /// Called when a text field gains focus (keyboard shown): pauses background chart refreshes.
+    @MainActor func beginEditing() {
+        resumeForecastsWorkItem?.cancel()
+        isEditing = true
+    }
+
+    /// Called when editing ends (keyboard hidden): resumes refreshes and catches the chart up if a
+    /// determination arrived while the user was typing. Does not affect what gets submitted — only
+    /// the chart's visual refresh is deferred. The catch-up is debounced so a quick field switch
+    /// (transient hide→show) doesn't refresh the chart mid-editing.
+    @MainActor func endEditing() {
+        resumeForecastsWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self = self else { return }
+                self.isEditing = false
+                guard self.hasDeferredForecastUpdate else { return }
+                self.hasDeferredForecastUpdate = false
+                self.scheduleInsulinAndForecastUpdate()
+            }
+        }
+        resumeForecastsWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: workItem)
     }
 
     @MainActor private func updateDeterminationFromController() {

@@ -334,12 +334,16 @@ public struct TextFieldWithToolBarString: UIViewRepresentable {
     var shouldBecomeFirstResponder: Bool = false
     var maxLength: Int? = nil
     var isDismissible: Bool = true
+    // Font auto-shrinking re-measures the field on every keystroke. Useful for numeric fields
+    // that must fit, but unnecessary for free text and a per-keystroke cost — let callers opt out.
+    var adjustsFontSizeToFitWidth: Bool = true
 
     public func makeUIView(context: Context) -> UITextField {
         let textField = UITextField()
         context.coordinator.textField = textField
         textField.inputAccessoryView = isDismissible ? createToolbar(for: textField, context: context) : nil
         textField.addTarget(context.coordinator, action: #selector(Coordinator.editingDidBegin), for: .editingDidBegin)
+        textField.addTarget(context.coordinator, action: #selector(Coordinator.editingChanged), for: .editingChanged)
         textField.delegate = context.coordinator
         textField.text = text
         textField.placeholder = placeholder
@@ -347,7 +351,7 @@ public struct TextFieldWithToolBarString: UIViewRepresentable {
         textField.keyboardType = keyboardType
         textField.autocapitalizationType = autocapitalizationType
         textField.autocorrectionType = autocorrectionType
-        textField.adjustsFontSizeToFitWidth = true
+        textField.adjustsFontSizeToFitWidth = adjustsFontSizeToFitWidth
         return textField
     }
 
@@ -379,7 +383,18 @@ public struct TextFieldWithToolBarString: UIViewRepresentable {
 
     public func updateUIView(_ textField: UITextField, context: Context) {
         if textField.text != text {
+            // Capture the caret offset before replacing the text so a programmatic/external
+            // change (e.g. paste, clear, restored value) doesn't snap the cursor to the end.
+            let caretOffset = textField.selectedTextRange.map {
+                textField.offset(from: textField.beginningOfDocument, to: $0.start)
+            }
             textField.text = text
+            if let caretOffset = caretOffset {
+                let clamped = min(caretOffset, (text as NSString).length)
+                if let position = textField.position(from: textField.beginningOfDocument, offset: clamped) {
+                    textField.selectedTextRange = textField.textRange(from: position, to: position)
+                }
+            }
         }
 
         textField.textAlignment = textAlignment
@@ -421,6 +436,13 @@ public struct TextFieldWithToolBarString: UIViewRepresentable {
                 textField.moveCursorToEnd()
             }
         }
+
+        // Push the binding update here, after UIKit has already committed the edit to the
+        // text field. The text field's text is authoritative at this point, so the resulting
+        // re-render finds `textField.text == text` in updateUIView and leaves the cursor alone.
+        @objc fileprivate func editingChanged(_ textField: UITextField) {
+            parent.text = textField.text ?? ""
+        }
     }
 }
 
@@ -442,14 +464,46 @@ extension TextFieldWithToolBarString.Coordinator: UITextFieldDelegate {
             return false
         }
 
-        // Attempt to replace characters in range with the replacement string
-        let newText = currentText.replacingCharacters(in: range, with: string)
-
-        // Update the binding text state
-        DispatchQueue.main.async {
-            self.parent.text = newText
-        }
-
+        // Allow the edit. The binding is updated in `editingChanged` once UIKit has applied
+        // it, which avoids the stale-binding race that previously snapped the cursor around.
         return true
+    }
+}
+
+/// Invisibly warms up the keyboard subsystem so the *first* tap on a text field presents the
+/// keyboard without the one-time initialization delay (the lag you don't get in Messages, where
+/// the keyboard is already warm). Renders nothing and never visibly shows a keyboard.
+///
+/// Drop this into a screen (e.g. as a zero-size sibling) where the user will shortly tap into a
+/// text field but no field is focused on appear.
+public struct KeyboardPrewarmer: UIViewRepresentable {
+    public init() {}
+
+    public func makeUIView(context _: Context) -> UIView {
+        PrewarmingView()
+    }
+
+    public func updateUIView(_: UIView, context _: Context) {}
+
+    private final class PrewarmingView: UIView {
+        private let warmUpField: UITextField = {
+            let field = UITextField()
+            field.isHidden = true
+            return field
+        }()
+
+        private var hasWarmedUp = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil, !hasWarmedUp else { return }
+            hasWarmedUp = true
+
+            addSubview(warmUpField)
+            // Become then immediately resign first responder: this spins up the keyboard
+            // machinery in the current run loop without ever committing a visible presentation.
+            warmUpField.becomeFirstResponder()
+            warmUpField.resignFirstResponder()
+        }
     }
 }
