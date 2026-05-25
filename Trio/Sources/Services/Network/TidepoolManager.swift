@@ -966,9 +966,13 @@ extension BaseTidepoolManager {
             modelType = .rapidAdult
             preset = .rapidActingAdult
         case .ultraRapid:
-            // Distinguish Fiasp vs Lyumjev using the pump's configured insulin type
+            // Distinguish Fiasp vs Lyumjev for timing using the pump's configured insulin type.
+            // Tidepool has no Lyumjev model type — mapping it downstream to `.other` without a
+            // `modelTypeOther` string makes the API reject the pumpSettings datum (400
+            // value-not-exists at /insulinModel/modelTypeOther). Report the closest native type
+            // (.fiasp); the actual curve (delay/duration/peak) below still uses the Lyumjev preset.
             let isLyumjev = apsManager.pumpManager?.status.insulinType == .lyumjev
-            modelType = isLyumjev ? .lyumjev : .fiasp
+            modelType = .fiasp
             preset = isLyumjev ? .lyumjev : .fiasp
         }
 
