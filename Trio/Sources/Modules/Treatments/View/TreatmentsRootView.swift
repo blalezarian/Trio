@@ -1,8 +1,10 @@
 import Charts
 import CoreData
+import Foundation
 import LoopKitUI
 import SwiftUI
 import Swinject
+import UIKit
 
 extension Treatments {
     struct RootView: BaseView {
@@ -345,6 +347,10 @@ extension Treatments {
 
         var body: some View {
             ZStack(alignment: .center) {
+                // Warm up the keyboard on appear so the first tap into the Note field doesn't pay
+                // the one-time keyboard initialization delay. Renders nothing.
+                KeyboardPrewarmer()
+                    .frame(width: 0, height: 0)
                 VStack {
                     ScrollViewReader { proxy in
                         List {
@@ -427,7 +433,12 @@ extension Treatments {
                                     TextFieldWithToolBarString(
                                         text: $state.note,
                                         placeholder: String(localized: "Note..."),
-                                        maxLength: 25
+                                        // Free text reads left-to-right; the default `.right` alignment
+                                        // anchors text to the right edge and collapses trailing spaces,
+                                        // which made the caret appear stuck when typing a space.
+                                        textAlignment: .natural,
+                                        maxLength: 25,
+                                        adjustsFontSizeToFitWidth: false
                                     )
                                 }
                             }.listRowBackground(Color.chart)
@@ -446,12 +457,17 @@ extension Treatments {
                             Foundation.NotificationCenter.default
                                 .publisher(for: UIResponder.keyboardWillShowNotification)
                         ) { notification in
+                            // While a field is being edited (keyboard up), pause background forecast-chart
+                            // refreshes so the chart re-render doesn't make typing feel laggy.
+                            state.beginEditing()
                             handleKeyboardWillShow(notification, proxy: proxy)
                         }
                         .onReceive(
                             Foundation.NotificationCenter.default
                                 .publisher(for: UIResponder.keyboardWillHideNotification)
                         ) { _ in
+                            // The chart catches up the moment the keyboard is dismissed.
+                            state.endEditing()
                             isKeyboardVisible = false
                             // Belt-and-suspenders alongside the staleness check in handleKeyboardWillShow:
                             // if the keyboard went away before a queued target was ever consumed, drop it.
